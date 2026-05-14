@@ -1,7 +1,13 @@
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 import tempfile
 import pandas as pd
+import csv
+import io
+import time
 from pathlib import Path
 
 from openai import OpenAI
@@ -11,10 +17,6 @@ from validator import validate_invoice
 from qa_agent import run_qa_agent, calculate_overall_confidence
 from schemas import ExtractionResult
 from batch import process_batch, generate_report
-
-from dotenv import load_dotenv
-load_dotenv()
-
 
 
 # ── Helper Functions ──
@@ -93,7 +95,7 @@ def display_invoice(result: ExtractionResult):
     st.caption("🟢 High (90%+)  🟡 Medium (70-89%)  🔴 Low (<70%)")
 
 
-def display_validation(result: ExtractionResult):
+def display_validation(result: ExtractionResult, threshold: float = 0.85):
     """Renders validation checks, confidence, status, and QA corrections."""
     st.subheader("Validation Results")
     for check in result.validation.checks:
@@ -106,7 +108,7 @@ def display_validation(result: ExtractionResult):
 
     conf_col, status_col = st.columns(2)
     conf_col.metric("Overall Confidence", f"{result.overall_confidence:.1%}")
-    if result.overall_confidence >= 0.85:
+    if result.overall_confidence >= threshold:
         status_col.success("✅ APPROVED")
     else:
         status_col.error("⚠️ NEEDS REVIEW")
@@ -117,10 +119,103 @@ def display_validation(result: ExtractionResult):
             st.info(correction)
 
 
+def display_confidence_chart(result: ExtractionResult):
+    """Renders a horizontal bar chart of per-field confidence scores."""
+    invoice = result.invoice
+
+    fields = {
+        "Vendor": invoice.vendor_name_confidence,
+        "Invoice #": invoice.invoice_number_confidence,
+        "Date": invoice.invoice_date_confidence,
+        "Subtotal": invoice.subtotal_confidence,
+        "Tax": invoice.tax_amount_confidence,
+        "Total": invoice.total_amount_confidence,
+    }
+
+    chart_data = {k: v for k, v in fields.items() if v is not None}
+
+    if not chart_data:
+        st.caption("No confidence scores available.")
+        return
+
+    df = pd.DataFrame({
+        "Field": list(chart_data.keys()),
+        "Confidence": list(chart_data.values()),
+    })
+
+    df["Color"] = df["Confidence"].apply(
+        lambda c: "🟢 High" if c >= 0.9 else ("🟡 Medium" if c >= 0.7 else "🔴 Low")
+    )
+
+    st.markdown("#### Field Confidence Breakdown")
+    st.bar_chart(df, x="Field", y="Confidence", horizontal=True)
+
+
+def results_to_csv(results_data):
+    """Converts extraction results to a CSV string for download."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "File", "Vendor", "Invoice #", "Date", "Customer",
+        "Subtotal", "Tax", "Total", "Confidence", "Status", "Attempts"
+    ])
+
+    if isinstance(results_data, list) and len(results_data) > 0 and isinstance(results_data[0], dict):
+        for r in results_data:
+            inv = r["result"].invoice
+            res = r["result"]
+            writer.writerow([
+                r["file"],
+                inv.vendor_name or "",
+                inv.invoice_number or "",
+                inv.invoice_date or "",
+                inv.customer_name or "",
+                f"{inv.subtotal:.2f}" if inv.subtotal else "",
+                f"{inv.tax_amount:.2f}" if inv.tax_amount else "",
+                f"{inv.total_amount:.2f}" if inv.total_amount else "",
+                f"{res.overall_confidence:.1%}",
+                "APPROVED" if res.overall_confidence >= 0.85 else "NEEDS REVIEW",
+                res.attempts,
+            ])
+    else:
+        items = results_data if isinstance(results_data, list) else [results_data]
+        for i, res in enumerate(items):
+            inv = res.invoice
+            writer.writerow([
+                f"Page {i + 1}" if len(items) > 1 else "Uploaded Invoice",
+                inv.vendor_name or "",
+                inv.invoice_number or "",
+                inv.invoice_date or "",
+                inv.customer_name or "",
+                f"{inv.subtotal:.2f}" if inv.subtotal else "",
+                f"{inv.tax_amount:.2f}" if inv.tax_amount else "",
+                f"{inv.total_amount:.2f}" if inv.total_amount else "",
+                f"{res.overall_confidence:.1%}",
+                "APPROVED" if res.overall_confidence >= 0.85 else "NEEDS REVIEW",
+                res.attempts,
+            ])
+
+    return output.getvalue()
+
+
 # ── Page Config ──
 
 st.set_page_config(page_title="Invoice Extraction Pipeline", layout="wide")
 st.title("Invoice Extraction Pipeline")
+
+# ── Sidebar Settings ──
+
+with st.sidebar:
+    st.header("Settings")
+    approval_threshold = st.slider(
+        "Approval Threshold",
+        min_value=0.50,
+        max_value=1.00,
+        value=0.85,
+        step=0.05,
+        help="Invoices with confidence above this threshold are auto-approved.",
+    )
 
 tab1, tab2 = st.tabs(["Single Invoice", "Batch Processor"])
 
@@ -139,6 +234,8 @@ with tab1:
         st.image(uploaded_file, caption="Uploaded Invoice", width=300)
 
         if st.button("Extract Invoice", key="single_extract"):
+            start_time = time.time()
+
             with tempfile.TemporaryDirectory() as tmp_dir:
                 image_paths = save_upload_as_image(uploaded_file, tmp_dir)
 
@@ -164,19 +261,22 @@ with tab1:
 
                         all_results.append(result)
 
+            elapsed = time.time() - start_time
+
             if len(all_results) == 1:
                 st.session_state["single_result"] = all_results[0]
             else:
                 st.session_state["single_result"] = all_results
 
+            st.session_state["single_time"] = elapsed
+
     # Display stored results
     if "single_result" in st.session_state:
         stored = st.session_state["single_result"]
 
-        # Handle multi-page PDFs
         if isinstance(stored, list):
             for i, result in enumerate(stored):
-                st.markdown(f"---")
+                st.markdown("---")
                 st.subheader(f"Page {i + 1}")
                 col1, col2 = st.columns([1, 2])
                 with col1:
@@ -186,7 +286,8 @@ with tab1:
                 with col2:
                     st.subheader("Extraction Results")
                     display_invoice(result)
-                display_validation(result)
+                display_validation(result, approval_threshold)
+                display_confidence_chart(result)
         else:
             result = stored
             col1, col2 = st.columns([1, 2])
@@ -197,7 +298,20 @@ with tab1:
             with col2:
                 st.subheader("Extraction Results")
                 display_invoice(result)
-            display_validation(result)
+            display_validation(result, approval_threshold)
+            display_confidence_chart(result)
+
+        if "single_time" in st.session_state:
+            st.caption(f"⏱️ Processed in {st.session_state['single_time']:.1f} seconds")
+
+        csv_data = results_to_csv(stored)
+        st.download_button(
+            "📥 Download as CSV",
+            csv_data,
+            "invoice_extraction.csv",
+            "text/csv",
+            key="single_csv",
+        )
 
 
 # ── Tab 2: Batch Processor ──
@@ -212,12 +326,12 @@ with tab2:
     )
 
     if uploaded_files and st.button("Run Batch Processing", key="batch_extract"):
+        start_time = time.time()
         client = OpenAI()
 
         image_data = {}
         with tempfile.TemporaryDirectory() as tmp_dir:
             for uf in uploaded_files:
-                file_bytes = uf.read()
                 image_paths = save_upload_as_image(uf, tmp_dir)
                 for img_path in image_paths:
                     image_data[Path(img_path).name] = Path(img_path).read_bytes()
@@ -225,8 +339,11 @@ with tab2:
             with st.spinner(f"Processing {len(uploaded_files)} invoices..."):
                 results = process_batch(tmp_dir, client)
 
+        elapsed = time.time() - start_time
+
         st.session_state["batch_results"] = results
         st.session_state["batch_images"] = image_data
+        st.session_state["batch_time"] = elapsed
 
     # Display stored results
     if "batch_results" in st.session_state:
@@ -236,18 +353,21 @@ with tab2:
         st.subheader("Batch Summary")
         confidences = [r["result"].overall_confidence for r in results]
         avg_confidence = sum(confidences) / len(confidences)
-        needs_review = sum(1 for c in confidences if c < 0.85)
+        needs_review = sum(1 for c in confidences if c < approval_threshold)
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Documents Processed", len(results))
         col2.metric("Avg Confidence", f"{avg_confidence:.1%}")
         col3.metric("Needs Review", needs_review)
 
+        if "batch_time" in st.session_state:
+            st.caption(f"⏱️ Batch completed in {st.session_state['batch_time']:.1f} seconds ({st.session_state['batch_time'] / len(results):.1f}s per invoice)")
+
         # ── Per-document results ──
         st.subheader("Per-Document Results")
         for r in results:
             res = r["result"]
-            status = "APPROVED" if res.overall_confidence >= 0.85 else "NEEDS REVIEW"
+            status = "APPROVED" if res.overall_confidence >= approval_threshold else "NEEDS REVIEW"
             icon = "✅" if status == "APPROVED" else "⚠️"
             with st.expander(f"{icon} {r['file']} — {res.overall_confidence:.1%} ({status})"):
                 img_col, data_col = st.columns([1, 2])
@@ -271,7 +391,25 @@ with tab2:
                 if res.corrections_made:
                     for correction in res.corrections_made:
                         st.info(correction)
+                display_confidence_chart(res)
 
-        # ── Downloadable report ──
-        report = generate_report(results)
-        st.download_button("Download Batch Report", report, "batch_report.md", "text/markdown")
+        # ── Download buttons ──
+        csv_col, md_col = st.columns(2)
+        with csv_col:
+            csv_data = results_to_csv(results)
+            st.download_button(
+                "📥 Download as CSV",
+                csv_data,
+                "batch_extraction.csv",
+                "text/csv",
+                key="batch_csv",
+            )
+        with md_col:
+            report = generate_report(results)
+            st.download_button(
+                "📥 Download Batch Report",
+                report,
+                "batch_report.md",
+                "text/markdown",
+                key="batch_md",
+            )
