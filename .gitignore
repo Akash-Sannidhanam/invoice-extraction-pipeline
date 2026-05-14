@@ -1,0 +1,26 @@
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# OS files
+.DS_Store
+
+# Generated reports
+batch_report.md
+
+# Temp files
+*.tmp
