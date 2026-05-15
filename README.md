@@ -7,6 +7,10 @@ Built with OpenAI GPT-4o-mini, Streamlit, and Pydantic.
 
 ![Demo](demo-invoice.gif)
 
+
+🔗 **[Try the live demo →](https://akash-sannidhanam-invoice-extraction-pipeline.streamlit.app)**
+
+
 ## ✨ Features
 
 | Feature | Description |
