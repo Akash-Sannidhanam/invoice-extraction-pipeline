@@ -19,6 +19,27 @@ from schemas import ExtractionResult
 from batch import process_batch, generate_report
 
 
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+import streamlit as st
+
+# Support Streamlit Cloud secrets (falls back to .env locally)
+try:
+    if "OPENAI_API_KEY" in st.secrets:
+        os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+except FileNotFoundError:
+    pass  # No secrets.toml — using .env instead
+
+
+
+
 # ── Helper Functions ──
 
 def save_upload_as_image(uploaded_file, tmp_dir: str) -> list[str]:
